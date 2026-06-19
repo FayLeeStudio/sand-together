@@ -1,7 +1,12 @@
-# Cloudflare Workers config for the Project Bar room backend.
+# Cloudflare Workers config for the Time in the Bottle room backend.
 # Deploys to a free *.workers.dev subdomain (no custom domain needed).
 #   local:  npm run party:dev     (wrangler dev → http://127.0.0.1:8787)
 #   deploy: npm run party:deploy   (wrangler deploy → project-bar.<subdomain>.workers.dev)
+# The worker keeps its original name "project-bar": it is ALREADY deployed and
+# reachable (index.html PROD_HOST points at it), the name is invisible to players
+# (they use room codes), and renaming would only orphan the live worker + change
+# the URL for no user-facing benefit. The DO class is likewise kept as RaceRoom
+# to match the live deployment (renaming a DO class needs a migration for nil gain).
 name = "project-bar"
 main = "party/server.ts"
 compatibility_date = "2026-06-18"

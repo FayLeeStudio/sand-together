@@ -1,6 +1,6 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "Project Bar",
+  "productName": "Time in the Bottle",
   "version": "0.1.0",
   "identifier": "design.indiegames.project-bar",
   "build": {
@@ -11,10 +11,10 @@
     "windows": [
       {
         "label": "main",
-        "title": "Project Bar",
+        "title": "Time in the Bottle",
         "url": "https://indiegames.design/Project-Bar/#overlay",
-        "width": 360,
-        "height": 300,
+        "width": 410,
+        "height": 660,
         "center": true,
         "resizable": true,
         "transparent": true,

@@ -1,19 +1,22 @@
-// Project Bar — room relay backend (Stage 2).
+// Time in the Bottle — room relay backend (Stage 2).
 //
 // History: originally planned on PartyKit's hosted cloud, but its shared domain
 // `partykit.dev` hit Cloudflare's hard limit of 10,000 custom domains per zone,
 // so new free deploys are blocked (2026-06). PartyKit is itself a thin wrapper
 // over Cloudflare Durable Objects, so we run that directly: free, always-on, no
 // custom domain needed (uses *.workers.dev). The job is unchanged — relay each
-// player's integer `ticks` to the room; it never knows the track shape or lap
-// length. Full rationale in Doc/Design.md §8.
+// player's integer `ticks` (their cumulative keystroke count) to the room; it
+// never knows the sand grid, colours, or physics. See Doc/backend.md and
+// Doc/architecture.md.
 //
 // Routing: wss://<host>/parties/main/<roomId>?_pk=<connId>
 //   · each roomId maps to one Durable Object instance (= one room),
 //   · the client supplies its own connection id via ?_pk, so it can recognise
-//     and skip its own car in the broadcast (no server-side help needed).
+//     and skip its own grains in the broadcast (no server-side help needed).
 
 export interface Env {
+  // Binding kept as RACEROOM/RaceRoom to match the already-deployed worker; the
+  // name is internal (players use room codes). See wrangler.toml for the why.
   RACEROOM: DurableObjectNamespace;
 }
 
@@ -26,7 +29,7 @@ export default {
       const stub = env.RACEROOM.get(env.RACEROOM.idFromName(roomId));
       return stub.fetch(request);
     }
-    return new Response("Project Bar room server (Cloudflare Durable Objects)", {
+    return new Response("Time in the Bottle room server (Cloudflare Durable Objects)", {
       status: 200,
       headers: { "content-type": "text/plain; charset=utf-8" },
     });
@@ -37,7 +40,7 @@ type PlayerState = { name: string; ticks: number };
 
 // One instance per roomId. Holds the room's players in memory and rebroadcasts
 // the full state on every change — same contract as the old PartyKit server.
-export class RaceRoom {
+export class RaceRoom {  // legacy class name, kept to match the live deployment
   players: Record<string, PlayerState> = {};
   conns: Map<WebSocket, string> = new Map(); // socket -> connId
 

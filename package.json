@@ -1,8 +1,8 @@
 {
-  "name": "project-bar-shell",
+  "name": "time-in-the-bottle-shell",
   "private": true,
   "version": "0.1.0",
-  "description": "Tauri shell for Project Bar — loads the GitHub Pages track UI. The web UI itself stays framework-free and build-step-free (index.html).",
+  "description": "Tauri shell for Time in the Bottle — loads the GitHub Pages bottle UI. The web UI itself stays vanilla JS with no build step (index.html).",
   "scripts": {
     "tauri": "tauri",
     "dev": "tauri dev",
