@@ -83,7 +83,7 @@
     display: block;
     width: 360px; height: 560px;
     background: transparent;                 /* the tint is painted inside the canvas */
-    border: 1px solid rgba(255,255,255,.14); /* faint bottle outline */
+    border: none;                            /* no frame — reads as "just sand", more pet-like */
     border-radius: 8px;
     image-rendering: pixelated;
     cursor: grab;
@@ -95,6 +95,7 @@
   canvas#bottle.grabbing { cursor: grabbing; }
 
   .scrollbar {
+    display: none;                /* hidden per design — drag the bottle to scroll */
     position: absolute;
     top: 8px; right: 8px; bottom: 8px;
     width: 4px;
@@ -147,6 +148,8 @@
     flex: none;
     animation: blink 2.4s infinite;
   }
+  /* not connected to a room server: grey + no blink (honest status indicator) */
+  .live-dot.off { background: #6b6b6b; animation: none; }
   #barCount { font-weight: 700; color: var(--chrome-text); }
   .bar-unit {
     font-size: 9.5px; letter-spacing: .12em; text-transform: uppercase;
@@ -261,7 +264,7 @@
       <!-- BAR · stats + menu (drag to move the window) ---------------- -->
       <div class="bar" id="bar">
         <div class="bar-stats">
-          <span class="live-dot"></span>
+          <span class="live-dot off" id="liveDot"></span>
           <span id="barCount">0</span>
           <span class="bar-unit">keystrokes</span>
         </div>
@@ -311,6 +314,7 @@
   const exitBtn    = $("exitBtn");
   const rankingEl  = $("ranking");
   const barCount   = $("barCount");
+  const liveDot    = $("liveDot");
   const buriedText = $("buriedText");
   const roomCodeEl = $("roomCode");
   const newRoomBtn = $("newRoomBtn");
@@ -893,6 +897,7 @@
 
   let ws = null;
   let reconnectTimer = null;
+  function setLive(ok) { if (liveDot) liveDot.classList.toggle("off", !ok); } // room-server connection status
   function sendJoin() {
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: "join", name: playerName }));
@@ -905,6 +910,7 @@
   }
   function scheduleReconnect() {
     ws = null;
+    setLive(false);
     if (reconnectTimer) return;
     reconnectTimer = setTimeout(function () { reconnectTimer = null; connect(); }, 2000);
   }
@@ -918,7 +924,7 @@
       );
     } catch (_) { return; } // bad host: stay single-player
     ws = socket;
-    socket.onopen = sendJoin;
+    socket.onopen = function () { sendJoin(); setLive(true); };
     socket.onmessage = onWsMessage;
     socket.onclose = scheduleReconnect; // auto-reconnect (incl. dev restarts)
     socket.onerror = function () {};     // error is followed by close → reconnect
