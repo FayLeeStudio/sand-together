@@ -371,7 +371,7 @@
   let frame = 0;
   let palU32 = [];
   let palShade = [];                 // palShade[slot] = 8 tones, lit crust → deep shadow
-  const SHADE_F = [1.22, 1.08, 1.0, 0.95, 0.91, 0.87, 0.84, 0.80];
+  const SHADE_F = [1.25, 1.0, 0.72]; // 3 chunky tones only: highlight / base / shadow (pixel-art)
   const colRun = new Int16Array(W);  // depth-from-top run length per column (shading)
   let artifacts = [];
   let fallingArtifact = null;
@@ -542,6 +542,11 @@
 
   function spawn() {
     const offs = [0, -1, 1, -2, 2];
+    // Emit ~24 rows above the pile surface, which (while following) lands right
+    // at the bulb's bottom opening on screen — so sand pours OUT of the bulb
+    // instead of streaking down from the canvas edge.
+    const row = Math.max(0, Math.min(activeH - 2, (surface() | 0) - 24));
+    const rb = row * W;
     for (const u of users) {
       let release = Math.min(u.queue, 2);
       while (release > 0) {
@@ -549,7 +554,7 @@
         for (const o of offs) {
           const xx = u.x + o;
           if (xx < 0 || xx >= W) continue;
-          if (grid[xx] === 0) { grid[xx] = u.slot; placed = true; break; }
+          if (grid[rb + xx] === 0) { grid[rb + xx] = u.slot; placed = true; break; }
         }
         if (!placed) break;
         u.queue--; release--;
@@ -607,10 +612,10 @@
         const c = src[base + x];
         if (!c) { colRun[x] = 0; continue; }                 // air resets the column run
         if (c >= ARTIFACT_BASE) { vbuf[o + x] = palU32[c]; colRun[x] = 0; continue; } // artifacts unshaded
-        // pixel shading by depth below the column's top: lit crust → gradually darker
+        // pixel shading: only 3 chunky tones by depth below the column's top
         const d = ++colRun[x];
         const sh = palShade[c];
-        vbuf[o + x] = sh[d < 8 ? d - 1 : 7];
+        vbuf[o + x] = sh[d <= 2 ? 0 : (d <= 6 ? 1 : 2)];
       }
     }
     vctx.putImageData(vimg, 0, 0);
@@ -630,25 +635,36 @@
   // ring with the pourer's name above, partially filled with their (textured)
   // sand — the tap the stream falls from.
   function drawSource(u) {
-    const cx = u.x * S, R = 16, cy = 32;
+    const cx = u.x * S, R = 16, cy = 32, step = 4;
+    // name above the bulb
     ctx.fillStyle = u.css;
     ctx.font = "700 9px 'JetBrains Mono', ui-monospace, monospace";
     ctx.textAlign = "center";
     ctx.fillText(u.name, cx, 13);
+    // translucent glass body
     ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2);
-    ctx.fillStyle = hexToRgba(u.css, 0.10); ctx.fill();        // faint glass
-    ctx.save(); ctx.clip();                                     // sand only inside the bulb
-    const light = shadeCss(u.css, 1.2), dark = shadeCss(u.css, 0.8);
-    for (let yy = cy - 3; yy < cy + R; yy += 4) {               // lower part filled ("partly shown")
-      for (let xx = cx - R; xx < cx + R; xx += 4) {
-        const h = (((xx * 7) ^ (yy * 13)) & 7);                 // stable grain texture, no flicker
-        ctx.fillStyle = h === 0 ? light : (h < 4 ? u.css : dark);
-        ctx.fillRect(xx, yy, 4, 4);
+    ctx.fillStyle = hexToRgba(u.css, 0.08); ctx.fill();
+    // sand inside: a concave funnel (caved in at the centre, like sand draining),
+    // clipped to the bulb, with only 3 chunky pixel tones
+    ctx.save(); ctx.clip();
+    const rim = cy - R * 0.28, dip = R * 0.62;
+    const light = shadeCss(u.css, 1.25), dark = shadeCss(u.css, 0.72);
+    for (let xx = cx - R; xx < cx + R; xx += step) {
+      const n = Math.min(1, Math.abs((xx + step / 2) - cx) / R); // 0 centre .. 1 rim
+      const topY = Math.round((rim + dip * (1 - n)) / step) * step; // centre sits lower
+      for (let yy = topY; yy < cy + R; yy += step) {
+        const d = (yy - topY) / step;
+        ctx.fillStyle = d < 1 ? light : (yy > cy + R * 0.45 ? dark : u.css);
+        ctx.fillRect(xx, yy, step, step);
       }
     }
     ctx.restore();
-    ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2);
-    ctx.lineWidth = 1.5; ctx.strokeStyle = hexToRgba(u.css, 0.5); ctx.stroke();
+    // glass specular highlight (top-left) — sells the translucent sphere
+    ctx.beginPath(); ctx.arc(cx - R * 0.36, cy - R * 0.42, R * 0.15, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(255,255,255,0.32)"; ctx.fill();
+    // glass ring with an opening at the bottom = the spout the sand pours from
+    ctx.beginPath(); ctx.arc(cx, cy, R, 0.60 * Math.PI, 2.40 * Math.PI);
+    ctx.lineWidth = 1.5; ctx.strokeStyle = hexToRgba(u.css, 0.55); ctx.stroke();
   }
 
   function draw() {
