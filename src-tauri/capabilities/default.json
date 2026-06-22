@@ -1,11 +1,20 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "enables the default permissions",
+  "description": "Default permissions, also granted to our remote VPS page so the bottle UI can use the shell APIs it needs: receive the global keycount event (Rust→webview), drag the window to move it, and close it.",
   "windows": [
     "main"
   ],
+  "remote": {
+    "urls": [
+      "https://sandtogether.indiegames.design"
+    ]
+  },
   "permissions": [
-    "core:default"
+    "core:default",
+    "core:window:allow-close",
+    "core:window:allow-start-dragging",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten"
   ]
 }
