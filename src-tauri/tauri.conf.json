@@ -17,7 +17,7 @@
         "width": 176,
         "height": 564,
         "center": true,
-        "resizable": true,
+        "resizable": false,
         "transparent": true,
         "decorations": false,
         "alwaysOnTop": true,

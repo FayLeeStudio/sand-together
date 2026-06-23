@@ -148,9 +148,10 @@
   }
   /* not connected to a room server: grey + no blink (honest status indicator) */
   .live-dot.off { background: #6b6b6b; animation: none; }
+  .bar-metric { display: flex; flex-direction: column; line-height: 1.1; }
   #barCount { font-weight: 700; color: var(--chrome-text); }
   .bar-unit {
-    font-size: 9.5px; letter-spacing: .12em; text-transform: uppercase;
+    font-size: 8.5px; letter-spacing: .1em; text-transform: uppercase;
     color: var(--chrome-weak);
   }
   .menu-btn {
@@ -255,8 +256,10 @@
       <div class="bar" id="bar">
         <div class="bar-stats">
           <span class="live-dot off" id="liveDot"></span>
-          <span id="barCount">0</span>
-          <span class="bar-unit">keystrokes</span>
+          <span class="bar-metric">
+            <span id="barCount">0</span>
+            <span class="bar-unit">keystrokes</span>
+          </span>
         </div>
         <button class="menu-btn" id="menuBtn" data-no-drag aria-haspopup="true" aria-label="菜单">≡</button>
       </div>
@@ -653,8 +656,12 @@
       const pos = await appWindow.outerPosition();   // physical
       const size = await appWindow.outerSize();       // physical
       const right = pos.x + size.width;               // keep this edge fixed
+      // the window is user-non-resizable (resizable:false); briefly allow programmatic
+      // resize so the menu can still grow the window, then lock it again.
+      if (appWindow.setResizable) await appWindow.setResizable(true);
       await appWindow.setSize(new TW.LogicalSize(t.w, t.h));
       await appWindow.setPosition(new TW.PhysicalPosition(right - Math.round(t.w * f), pos.y));
+      if (appWindow.setResizable) await appWindow.setResizable(false);
     } catch (_) {} finally { winBusy = false; }
   }
   function setMenu(open) { menu.hidden = !open; if (open) updateChrome(); fitWindow(open); }
