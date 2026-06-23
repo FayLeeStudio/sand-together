@@ -31,13 +31,13 @@ fs.mkdirSync(DATA_DIR, { recursive: true });
 
 // --- sim constants (shared contract with the client renderer; frontend.md) ---
 const W = 80;             // grid columns
-const H = 200;            // grid rows (authoritative; the client shows a window)
+const H = 300;            // grid rows (authoritative; the client shows a window). Raised 200→300 for a taller bottle — must match the client's H
 const ROOM_COLORS = ["amber", "teal", "violet", "rose"]; // slot 1..4 = grid value
 const ROOM_CAP = 4;
 const SPOUT_X = { 1: 30, 2: 50, 3: 10, 4: 70 }; // evenly spaced across W=80, centre-out (must match client)
 const SURFACE_MIN_CELLS = 6;  // a row needs this many grains to count as the settled surface
 const SPAWN_ROW = 2;          // top boundary for the pour source
-const SPAWN_GAP = 92;         // pour above the peak; tuned with the client's 0.618 camera anchor so the spout sits near the top of the view
+const SPAWN_GAP = 135;        // pour above the peak; tuned with the client's 0.618 anchor + viewRows=250 so the spout sits near the top of the view
 const TICK_MS = 50;           // ~20fps physics
 const MAX_SPAWN_PER_TICK = 4; // per player, so a burst doesn't dump all at once
 const SAVE_MS = 5000;

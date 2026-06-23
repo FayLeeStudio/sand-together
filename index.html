@@ -69,19 +69,22 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: 14px;
+    padding: 8px;
     user-select: none;
     -webkit-user-select: none;
   }
+  /* In the App (overlay) right-anchor the pet, so when the menu opens we can grow the
+     window to the LEFT into that space; in a plain browser keep it centred for dev. */
+  html.overlay .workbench { justify-content: flex-end; }
 
   .pet { position: relative; display: flex; flex-direction: column; gap: 8px; }
 
   /* ---- the bottle ----------------------------------------------------- */
-  .bottle-wrap { position: relative; width: 240px; height: 510px; }
+  .bottle-wrap { position: relative; width: 160px; height: 500px; }
 
   canvas#bottle {
     display: block;
-    width: 240px; height: 510px;
+    width: 160px; height: 500px;
     background: transparent;                 /* the tint is painted inside the canvas */
     border: none;                            /* flat & pure-transparent (Beeper-style): no */
     image-rendering: pixelated;              /* frame, no drop-shadow, no frost — only sand */
@@ -136,7 +139,7 @@
     cursor: grab;
   }
   .bar:active { cursor: grabbing; }
-  .bar-stats { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; font-size: 12px; }
+  .bar-stats { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; font-size: 11px; }
   .live-dot {
     width: 6px; height: 6px; border-radius: 50%;
     background: var(--color-user-1);
@@ -168,7 +171,7 @@
   .menu {
     position: absolute;
     right: 0; top: 46px;
-    width: 240px;
+    width: 230px;
     background: var(--chrome-bg);
     border: 1px solid var(--chrome-border);
     border-radius: 8px;
@@ -282,7 +285,7 @@
 
       <!-- BODY · the bottle (drag to dig) ----------------------------- -->
       <div class="bottle-wrap">
-        <canvas id="bottle" width="240" height="510" data-no-drag aria-label="瓶子"></canvas>
+        <canvas id="bottle" width="160" height="500" data-no-drag aria-label="瓶子"></canvas>
         <div class="scrollbar"><div class="thumb" id="thumb"></div></div>
         <button class="surface-btn" id="surfaceBtn" data-no-drag hidden>↑ back to surface</button>
       </div>
@@ -302,6 +305,7 @@
 
   // --- DOM handles ---
   const workbench  = $("workbench");
+  const bar        = $("bar");
   const canvas     = $("bottle");
   const thumbEl    = $("thumb");
   const surfaceBtn = $("surfaceBtn");
@@ -343,11 +347,11 @@
   function colorToSlot(c) { const i = COLOR_NAMES.indexOf(c); return i >= 0 ? i + 1 : 1; }
 
   // --- render constants (MUST match the server's sim: W/H/colours/spout) ---
-  const W = 80, H = 200;     // authoritative grid size (server owns it)
-  const S = 3;               // pixels per cell on screen
-  const viewRows = 170;      // visible rows (170 * 3 = 510px)
-  const SRC_R = 5;           // bulb radius in grid rows
-  const SPAWN_GAP = 92;      // source rides this far above the surface (matches server); with the 0.618 anchor this lands the spout near the top of the view
+  const W = 80, H = 300;     // authoritative grid size (server owns it; H raised 200→300 for a taller bottle)
+  const S = 2;               // px per cell — SQUARE pixels. 80*2=160px wide; with viewRows below the bottle is 500px tall
+  const viewRows = 250;      // visible rows (250 * S = 500px); must stay < H so the camera has room to scroll
+  const SRC_R = 5;           // bulb radius in grid rows (scales with S → a smaller, still-round ball at S=2)
+  const SPAWN_GAP = 135;     // source rides this far above the surface (matches server); with the 0.618 anchor + viewRows=250 this lands the spout near the top of the view
   const CAMERA_ANCHOR = 0.618; // pin the pile surface this far down the view; everything above is transparent sky holding the fixed spout
   const HEADROOM = 36;       // air rows kept above the surface while following
   const SPOUT_X = { 1: 30, 2: 50, 3: 10, 4: 70 }; // evenly spaced across W=80, centre-out (must match server)
@@ -454,7 +458,7 @@
   function drawSource(u, cy) {
     const cx = u.x * S, R = SRC_R * S, step = S;
     ctx.fillStyle = u.css;
-    ctx.font = "8px 'Silkscreen', 'JetBrains Mono', monospace";
+    ctx.font = "7px 'Silkscreen', 'JetBrains Mono', monospace";
     ctx.textAlign = "center";
     ctx.fillText(u.name, cx, cy - R - 7);
     const tones = [shadeCss(u.css, 1.25), u.css];
@@ -620,20 +624,44 @@
   });
   surfaceBtn.addEventListener("click", function () { follow = true; });
 
-  workbench.addEventListener("pointerdown", function (e) {
+  // Only the BAR is a window-drag handle now — the transparent margins around the
+  // bottle no longer grab/drag the window (they're inert). Clicking the ≡ button
+  // opens the menu instead of dragging. (Full click-through-to-desktop is a separate
+  // follow-up; see notes.)
+  bar.addEventListener("pointerdown", function (e) {
     if (e.button !== 0) return;
-    if (e.target.closest("canvas, [data-no-drag]")) return;
+    if (e.target.closest("[data-no-drag]")) return;
     if (appWindow) appWindow.startDragging();
   });
 
   // ---------------------------------------------------------------------------
   // Menu
   // ---------------------------------------------------------------------------
-  function closeMenu() { menu.hidden = true; }
+  // The App window hugs the bottle so it doesn't occlude a ring of desktop around it.
+  // When the menu opens we grow the window to the LEFT (right edge fixed, so the bottle
+  // doesn't jump) to make room for a wider, right-aligned menu; shrink back on close.
+  // Browser / no-Tauri: this no-ops and the menu just overlays.
+  const WIN_COLLAPSED = { w: 176, h: 564 };
+  const WIN_EXPANDED  = { w: 248, h: 564 };
+  let winBusy = false;
+  async function fitWindow(open) {
+    if (!appWindow || !TW || !TW.LogicalSize || !TW.PhysicalPosition || winBusy) return;
+    winBusy = true;
+    try {
+      const t = open ? WIN_EXPANDED : WIN_COLLAPSED;
+      const f = await appWindow.scaleFactor();
+      const pos = await appWindow.outerPosition();   // physical
+      const size = await appWindow.outerSize();       // physical
+      const right = pos.x + size.width;               // keep this edge fixed
+      await appWindow.setSize(new TW.LogicalSize(t.w, t.h));
+      await appWindow.setPosition(new TW.PhysicalPosition(right - Math.round(t.w * f), pos.y));
+    } catch (_) {} finally { winBusy = false; }
+  }
+  function setMenu(open) { menu.hidden = !open; if (open) updateChrome(); fitWindow(open); }
+  function closeMenu() { setMenu(false); }
   menuBtn.addEventListener("click", function (e) {
     e.stopPropagation();
-    menu.hidden = !menu.hidden;
-    if (!menu.hidden) updateChrome();
+    setMenu(menu.hidden);
   });
   document.addEventListener("click", function (e) {
     if (!menu.hidden && !menu.contains(e.target) && e.target !== menuBtn) closeMenu();
