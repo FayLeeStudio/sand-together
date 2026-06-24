@@ -12,7 +12,7 @@
 - **单一字族、单一强调色**：等宽字（JetBrains Mono）+ 琥珀色，避免视觉噪音
 - **暖中性灰**：所有白/黑带暖调，低饱和，避免廉价感
 - **数据即装饰**：排行、计数、颗粒数是画面的全部信息密度，不堆砌多余图标
-- **像素美学**：沙井保留 3px 像素颗粒（`S=3`），与等宽字呼应，统一"低分辨率仪器"语言
+- **像素美学**：沙井保留 2px 方形像素颗粒（`S=2`），与等宽字呼应，统一"低分辨率仪器"语言
 
 ---
 
@@ -105,7 +105,7 @@ font-family: 'JetBrains Mono', ui-monospace, monospace;
 |---|---|
 | 卡片内边距 | `26px 28px 24px` |
 | 卡片圆角 | `6px` |
-| 瓶子 canvas | `240 × 510px`（`W=80 × S=3`，可视 `viewRows=170` 行），`image-rendering: pixelated` |
+| 瓶子 canvas | `160 × 500px`（`W=80 × S=2`，可视 `viewRows=250` 行），`image-rendering: pixelated` |
 | 右栏宽度 | `272px` |
 | 主体两栏间距 | `28px` |
 | 卡片内纵向 gap | `20px` |
@@ -121,11 +121,11 @@ font-family: 'JetBrains Mono', ui-monospace, monospace;
 
 ### 瓶子（canvas）
 
-- 背景色：`--color-well-bg`，`image-rendering: pixelated`，4px 像素颗粒
+- 背景色：`--color-well-bg`，`image-rendering: pixelated`，2px 方形像素颗粒（`S=2`）
 - 右侧贴 4px 自定义滚动条：轨 `--color-scrollbar-track`，滑块 `--color-scrollbar-thumb`
-- 拖拽行为：鼠标按住**向上拖** = 向下挖掘、看更早沉积的沙（grab-the-content 手感）；光标 `grab` → `grabbing`
-- 浏览历史时：顶部浮出琥珀色 `↑ back to surface` 胶囊按钮（`--color-surface-btn`）
-- 下方脚注：左 `the bottle · drag up to dig`，右 `N keystrokes`
+- 导航（**按钮优先**，桌面端手感更稳）：悬停瓶子时浮出两个细条按钮——**顶部 `↑ 地表`**（回到实时表面）、**底部 `↓ 更早`**（向下跳约一屏、挖更早的沉积）；不悬停时隐藏。仍保留鼠标按住**向上拖**自由滚动作为辅助（光标 `grab` → `grabbing`）
+- 到顶 / 到底**硬停**：相机钳制在 `[followTarget, maxCameraY]`——跳/拖到最深历史即停，不再出现"假死区"继续滑出空白；`↑ 地表` 只在离开表面时出现，`↓ 更早` 只在下方还有更深历史时出现
+- 计数显示在瓶子下方的 bar 上；`≡` 菜单点开为**独立弹出窗口**（不是内嵌下拉——窄至 160px 的叠加层里内嵌下拉会被裁切/遮挡瓶子）
 
 ### 用户排行栏（who's pouring）
 
@@ -165,9 +165,9 @@ font-family: 'JetBrains Mono', ui-monospace, monospace;
 | 像素格 S | 2px | 渲染时每格 = 2×2 像素（80×2 = 160px 宽） |
 | 可视行数 `viewRows` | 250 行 | = 500px |
 | 出口 `SPOUT_X` | {1:30, 2:50, 3:10, 4:70} | 按槽位、沿 `W=80` 均匀分布（中心向外，见下"出口布局"） |
-| `SPAWN_GAP` | 16 行 | 出沙口在堆顶上方这么多行（服务端 spawn 位置 = 客户端画水龙头位置，**必须一致**）；小 = 水龙头贴着沙面、落差短、上方不留大片空白 |
+| `SPAWN_GAP` | 75 行 | 出沙口在堆顶上方这么多行（服务端 spawn 位置 = 客户端画水龙头位置，**必须一致**）；与 `CAMERA_ANCHOR` 配套，让水龙头停在视口顶部附近、沙在下方 ~0.618 处堆积 |
 | 重力子步 | 2 / tick | 服务端每 tick 推进 2 次（下落更顺） |
-| 镜头锚点 `CAMERA_ANCHOR` | 0.30 | 让堆顶维持在视口从顶往下 **0.30** 处：沙子填满下方 ~70%，水龙头(堆顶上方 `SPAWN_GAP`)贴近顶部、靠近菜单条。调小 → 沙面/水龙头更靠上。两个常量(`SPAWN_GAP`/`CAMERA_ANCHOR`)按手感微调 |
+| 镜头锚点 `CAMERA_ANCHOR` | 0.382 | 让堆顶维持在视口从顶往下 **0.382** 处：沙子填满下方 **~0.618**（黄金比），水龙头(堆顶上方 `SPAWN_GAP`)贴近顶部、靠近菜单条。调小 → 沙面/水龙头更靠上。两个常量(`SPAWN_GAP`/`CAMERA_ANCHOR`)按手感微调 |
 | 地表平滑（防抖） | 升快降慢 | `smSurface` 朝实测堆顶**上升快(0.2)、下降慢(0.02)**：跟踪"已落定的最高水位"。不出沙时沙堆不变 → 地表/镜头/水龙头**稳定不抖**，相当于相对镜头静止；只有真在加沙时才跟随上移。实测堆顶仍按"行内 ≥6 格才算地表"(`SURFACE_MIN_CELLS`)，细水流不会误触发 |
 | 归档带 `bands`（Stage 3） | 每条按**真实高度** `rows` 逐像素渲染 | 活动网格下方的历史层（**逐像素无损**，`cells = rows*W`）。每条 band 在世界坐标里占它真实的 `rows` 行，渲染时和活体沙**用同一套着色**（深度 run 跨活动/归档接缝连续）→ 滑下去看到的历史和当时一模一样、无缝。相机范围 `worldH = H + archiveRows`（`archiveRows = Σ band.rows`） |
 | 归档查找 `archiveSeg` | `[{top,rows,bi}]`，bands 变化时重建 | 世界行 → band 的连续分段索引（seg 0 = 最新、紧贴活动网格）。每帧渲染是**窗口化**的增量行走（只碰 `viewRows` 行 + 跨段时推进指针）——拖过很长历史也只渲染视口内那些行，保持流畅 |
@@ -204,6 +204,6 @@ font-family: 'JetBrains Mono', ui-monospace, monospace;
 
 **渲染管线：**
 
-1. 可视世界行 → `80×172` 离屏 `ImageData`（`Uint32` 直写像素）
-2. `drawImage` 放大 3× 到主 canvas
+1. 可视世界行 → `80×(viewRows+2)` 离屏 `ImageData`（`Uint32` 直写像素）
+2. `drawImage` 放大 2×（`S=2`）到主 canvas
 3. `-frac * S` 实现亚像素平滑滚动

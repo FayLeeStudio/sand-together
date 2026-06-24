@@ -28,6 +28,7 @@ ws://<host>/r/<roomId>?_pk=<playerId>
 - 每个 `roomId` 对应一个内存中的 `Room`（含 grid + 模拟循环）。
 - `_pk` = 客户端**持久** playerId（存 localStorage 复用），用于认出"老玩家回来了" vs "新玩家"。
 - 默认端口 `8090`（`PORT` 环境变量可改）。生产经 Caddy 反代为 `wss://<domain>`。
+- 同一 HTTP 服务还**托管前端**：`GET /`（或 `/index.html`）直接返回仓库根的 `index.html`，带 `cache-control: no-cache`（避免 webview/浏览器缓存住旧页面 → 前端改动 `git pull` 即生效、无需重启进程）。Tauri 外壳与浏览器都加载这个 URL，不再用 GitHub Pages。
 
 ---
 
@@ -53,13 +54,13 @@ ws://<host>/r/<roomId>?_pk=<playerId>
 { type:"snapshot", w:80, h:300,
   players:{ "<id>":{ name, color, ticks }, ... },
   grid:"<base64 of W*H bytes>",
-  bands:[ { rows, n, cols:"<base64 W bytes>" }, ... ] }
+  bands:[ { rows, n, cells:"<base64 rows*W bytes>" }, ... ] }
 
 // 每 tick：变化的网格单元（扁平 [格子下标, 新值, 格子下标, 新值, ...]）
 { type:"patch", c:[ idx0,val0, idx1,val1, ... ] }
 
 // Stage 3：新生成一条归档带（活动网格刚把底部 rows 行压缩归档、整体下移 rows 行）
-{ type:"band", rows, n, cols:"<base64 W bytes>" }
+{ type:"band", rows, n, cells:"<base64 rows*W bytes>" }
 
 // 玩家名册变化（join / leave）
 { type:"players", players:{ "<id>":{ name, color, ticks }, ... } }
@@ -74,7 +75,7 @@ ws://<host>/r/<roomId>?_pk=<playerId>
 - 格子值：`0`=空，`1..4`=玩家槽位（颜色）。`idx = row*W + col`。
 - 增量优先：高频 tick 只发变化单元；`snapshot` 仅在加入时发一次。
 - `band` 是低频事件（只在压缩触发时发一条）。收到时客户端做与服务端**完全相同**的确定性下移（`grid` 整体下移 `rows` 行、顶部腾空），再把这条带追加到归档；因为是确定性的，无需重发整张 `snapshot`，稳态几乎不占带宽。
-- 客户端**不做** 1px 细条特殊显示：归档带在世界坐标里按真实高度 `rows` 展开，滚动到附近时显示成正常高度的彩色层（每列主色，有损），压缩对用户透明。相机随之 `cameraY += rows`，视图不动。
+- 客户端**不做** 1px 细条特殊显示：归档带在世界坐标里按真实高度 `rows` 展开，滚动到附近时**逐像素无损**还原（`cells` = `rows*W` 精确像素，和当时一模一样），压缩对用户透明。相机随之 `cameraY += rows`，视图不动。
 
 ---
 
@@ -103,7 +104,7 @@ conns   : Map<ws, playerId>
 | 活动网格 `W × H` | 80 × 300 | 服务端持有；客户端显示其中一个窗口（viewRows=250）。底部老沙超阈值时压缩归档（见 Stage 3），而非把 H 无限加大 |
 | 颜色槽位 | amber/teal/violet/rose = 1/2/3/4 | `color 名 → grid 值`，全局一致 |
 | 出口 `SPOUT_X` | {1:30,2:50,3:10,4:70} | 按槽位、沿 `W=80` 均匀分布（中心向外）；出口随堆顶上移（`surface - SPAWN_GAP`） |
-| `SPAWN_GAP` | 16 | 出沙口在堆顶上方这么多行（短落差，不留大片空白）；**必须与客户端同名常量一致**（决定水龙头画在哪） |
+| `SPAWN_GAP` | 75 | 出沙口在堆顶上方这么多行；与客户端 `CAMERA_ANCHOR` 配套，让水龙头停在视口顶部附近、沙在下方 ~0.618 处堆积；**必须与客户端同名常量一致**（决定水龙头画在哪） |
 | 物理帧率 | 20fps（`TICK_MS=50`） | 每 tick：spawn → flood → 重力×2 子步 → diff → 广播 patch → 压缩检查（2 子步让下落更顺） |
 | 出水口画笔 `DEFAULT_SPOUT` | 1（上限 `SPOUT_MAX=5`） | 出沙是以出口为锚点的 **N×N 方形画笔**：每 tick 在 footprint 内从队列补满。1=一颗一颗，≥2=连续 |
 | 房间容量 | 4 人 | 第 5 个新玩家 → `room_full` |
@@ -144,7 +145,7 @@ conns   : Map<ws, playerId>
 
 ## 持久化
 
-- 每房间一个文件 `server/data/<roomId>.json`：`{ players, grid:<base64>, bands:[{rows,n,cols}] }`（gitignored）。
+- 每房间一个文件 `server/data/<roomId>.json`：`{ players, grid:<base64>, bands:[{rows,n,cells}] }`（gitignored；`cells` = 该 band `rows*W` 字节的精确像素，base64）。
 - 写：dirty 时每 5s 一次 + 房间空闲停机前。读：房间首次激活时。
 - 向后兼容：老存档没有 `bands` 字段 → 视为 `[]`。
 - 服务端就是存档的唯一真相；新玩家加入直接收 `snapshot`（含 `bands`），不重放。
