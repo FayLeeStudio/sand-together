@@ -444,18 +444,12 @@
   // spouts. Anchoring on the bare highest-occupied cell made the camera and the
   // spouts jitter every frame as grains fell past; counting a few cells is stable.
   const SURFACE_MIN_CELLS = 6;
-  // Scan UP FROM THE BOTTOM and stop at the first row that isn't part of the settled
-  // mass — so the wide/fast pour stream (not yet connected to the bottom) can't drag
-  // the camera/spout up with it. Matches the server's surface(). Identical to a
-  // top-down scan whenever the stream is narrow.
   function surface() {
-    let top = H;
-    for (let y = H - 1; y >= 0; y--) {
+    for (let y = 0; y < H; y++) {
       const b = y * W; let n = 0;
-      for (let x = 0; x < W; x++) if (grid[b + x]) n++;
-      if (n >= SURFACE_MIN_CELLS) top = y; else break;
+      for (let x = 0; x < W; x++) if (grid[b + x] && ++n >= SURFACE_MIN_CELLS) return y;
     }
-    return top;
+    return H;
   }
   // Low-passed surface so the camera + spouts glide instead of stepping row by row.
   let smSurface = H;

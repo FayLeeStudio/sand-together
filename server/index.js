@@ -56,28 +56,9 @@ const SURFACE_MIN_CELLS = 6;  // a row needs this many grains to count as the se
 const SPAWN_ROW = 2;          // top boundary for the pour source
 const SPAWN_GAP = 135;        // pour above the peak; tuned with the client's 0.618 anchor + viewRows=250 so the spout sits near the top of the view
 const TICK_MS = 50;           // ~20fps physics
+const MAX_SPAWN_PER_TICK = numEnv("SAND_MAX_SPAWN", 4); // per player, so a burst doesn't dump all at once (thin stream)
 const SAVE_MS = numEnv("SAND_SAVE_MS", 5000);
-
-// --- faucet: input → sand flow (server decides; client only reports counts) ---
-// A keystroke is worth GRAINS_PER_KEY grains (so input gives fuller feedback). Typing
-// opens the faucet for FAUCET_WINDOW_MS; while open it pours FLOW_BASE + rate·k grains
-// /tick (so faster typing = bigger flow), capped at FLOW_MAX; once it closes the
-// residue drains at FLOW_CLOSED so the stream tapers off. All tunable — future skills
-// will modulate these. (Grain COUNT comes from keystrokes; FLOW is just the rate.)
-const GRAINS_PER_KEY  = numEnv("SAND_GRAINS_PER_KEY", 6);
-const FAUCET_WINDOW_MS = numEnv("SAND_FAUCET_WINDOW", 500);
-const FLOW_BASE       = numEnv("SAND_FLOW_BASE", 10);   // grains/tick/player, open, slow typing
-const FLOW_PER_RATE   = 1.2;                            // extra grains/tick per key/sec of typing speed
-const FLOW_MAX        = numEnv("SAND_MAX_SPAWN", 40);   // cap grains/tick/player (SAND_MAX_SPAWN override kept)
-const FLOW_CLOSED     = 6;                              // residual drain once the faucet has closed
-const QUEUE_CAP       = numEnv("SAND_QUEUE_CAP", 4000); // pending grains cap per player
-// A w-wide stream can only pass ~2·w grains/tick (each column drops ≤2 rows/tick); pour
-// faster than that and sand plugs at the spout instead of filling the bottle bottom-up.
-// So we spread the pour across the FULL width (centre-out) and keep the firehose under
-// that ceiling. placeGrains fans `flow` grains over ~`flow` cells in 1–2 rows → 2·width
-// throughput always exceeds inflow → never plugs.
-const FIREHOSE_FLOW   = numEnv("SAND_FIREHOSE", 120);   // debug {type:"flood"} pour rate (fast, but below 2·W)
-const OFFS = (() => { const a = [0]; for (let i = 1; i <= W; i++) { a.push(-i, i); } return a; })();
+const FLOOD_ROWS_PER_TICK = 6; // debug {type:"flood"}: directly fill this many bottom rows/tick (fast-fill for testing)
 
 // --- Stage 3: archive compression (infinite stacking; see doc/stage3-compression.md) ---
 // When the settled surface crowds within COMPRESS_MARGIN rows of the top, fold the
@@ -100,7 +81,7 @@ class Room {
     this.bands = [];                   // Stage 3 archive: [{ rows, n, cols:Uint8Array(W) }], index 0 = oldest/deepest
     this.players = {};                 // playerId -> { name, color, ticks }
     this.queues = {};                  // playerId -> grains pending spawn
-    this.faucet = {};                  // playerId -> { rate, openUntil, lastAt, firehose } (input→flow)
+    this.flooding = {};                // playerId -> bool (debug fast-fill)
     this.conns = new Map();            // ws -> playerId
     this.frame = 0;
     this.dirty = false;                // grid/players changed since last save
@@ -166,35 +147,24 @@ class Room {
     this.broadcastPlayers(); // everyone learns the roster change
     return true;
   }
-  faucetOf(playerId) {
-    return this.faucet[playerId] || (this.faucet[playerId] = { rate: 0, openUntil: 0, lastAt: 0, firehose: false });
-  }
   onInput(playerId, ticks) {
     const p = this.players[playerId];
     if (!p) return;
     ticks = Number(ticks) || 0;
     const delta = ticks - p.ticks;
+    if (delta > 0) this.queues[playerId] = Math.min((this.queues[playerId] || 0) + delta, 600);
     p.ticks = ticks;
-    if (delta <= 0) return;
-    const now = Date.now(), f = this.faucetOf(playerId);
-    if (f.lastAt) { // smooth the typing rate (keys/sec) so flow tracks how fast you type
-      const inst = delta / (Math.max(16, now - f.lastAt) / 1000);
-      f.rate = f.rate ? f.rate * 0.6 + inst * 0.4 : inst;
-    }
-    f.lastAt = now;
-    f.openUntil = now + FAUCET_WINDOW_MS;
-    this.queues[playerId] = Math.min((this.queues[playerId] || 0) + delta * GRAINS_PER_KEY, QUEUE_CAP);
   }
-  setFirehose(playerId, on) { if (this.players[playerId]) this.faucetOf(playerId).firehose = !!on; } // debug fast-fill
+  setFirehose(playerId, on) { if (this.players[playerId]) this.flooding[playerId] = !!on; } // debug fast-fill toggle
   leave(playerId) {
     if (!this.players[playerId]) return;
-    delete this.players[playerId]; delete this.queues[playerId]; delete this.faucet[playerId];
+    delete this.players[playerId]; delete this.queues[playerId]; delete this.flooding[playerId];
     this.dirty = true; this.broadcastPlayers();
   }
-  drop(ws) { // keep player (offline ≠ exit), but stop any debug firehose so it can't pour forever
+  drop(ws) { // keep player (offline ≠ exit), but stop any debug fast-fill so it can't run forever
     const pid = this.conns.get(ws);
     this.conns.delete(ws);
-    if (pid && this.faucet[pid]) this.faucet[pid].firehose = false;
+    if (pid) this.flooding[pid] = false;
     this.maybeStop();
   }
   reset() { // empty the room's shared canvas + archive (Stage 1: anyone may; prototype)
@@ -203,61 +173,59 @@ class Room {
   }
 
   // ---- physics (ported from the old client engine; now authoritative) ----
-  // Both pile measures scan UP FROM THE BOTTOM and stop at the first row that isn't
-  // part of the settled mass. That ignores the curtain of still-falling grains (which
-  // isn't connected to the bottom yet), so a wide/fast pour can't fool either the pour
-  // source or the archive trigger. Identical to a top-down scan when the stream is
-  // narrow. (The client mirrors surface() so its camera + spout agree.)
-  surface() { // settled pile top: highest row, contiguous from the bottom, with enough sand
-    let top = H;
-    for (let y = H - 1; y >= 0; y--) {
+  surface() { // settled pile top: first row (top→down) with enough sand to be a real
+    // surface, not the few grains still falling — keeps the pour source from chasing
+    // its own stream (matches the client's camera anchor).
+    for (let y = 0; y < H; y++) {
       const b = y * W; let n = 0;
-      for (let x = 0; x < W; x++) if (this.grid[b + x]) n++;
-      if (n >= SURFACE_MIN_CELLS) top = y; else break;
+      for (let x = 0; x < W; x++) if (this.grid[b + x] && ++n >= SURFACE_MIN_CELLS) return y;
     }
-    return top;
+    return H;
   }
-  packedTop() { // highest row, contiguous from the bottom, that is at least HALF full
+  packedTop() { // first row (top→down) that is at least HALF full — a genuinely packed
+    // layer. The thin pour stream never fills half a row, so this won't fire the archive
+    // trigger prematurely while the bottle fills.
     const need = W >> 1;
-    let top = H;
-    for (let y = H - 1; y >= 0; y--) {
+    for (let y = 0; y < H; y++) {
       const b = y * W; let n = 0;
-      for (let x = 0; x < W; x++) if (this.grid[b + x]) n++;
-      if (n >= need) top = y; else break;
+      for (let x = 0; x < W; x++) if (this.grid[b + x] && ++n >= need) return y;
     }
-    return top;
-  }
-  // Place up to n grains for a spout at column x0, source row sr. Fans out centre-out
-  // across columns and downward across a few rows, so a big flow (fast typing / firehose)
-  // makes a visibly wider, thicker stream instead of stacking in one row.
-  placeGrains(slot, x0, sr, n) {
-    let placed = 0;
-    const maxRows = 16;
-    for (let r = 0; r < maxRows && placed < n; r++) {
-      const rb = (sr + r) * W;
-      if (rb + W > W * H) break;
-      for (let i = 0; i < OFFS.length && placed < n; i++) {
-        const xx = x0 + OFFS[i];
-        if (xx < 0 || xx >= W) continue;
-        if (this.grid[rb + xx] === 0) { this.grid[rb + xx] = slot; placed++; }
-      }
-    }
-    return placed;
+    return H;
   }
   spawn() {
+    const offs = [0, -1, 1, -2, 2]; // thin stream: a few columns centred on the spout
     const sr = Math.max(SPAWN_ROW, this.surface() - SPAWN_GAP); // source rides just above the peak
-    const now = Date.now();
+    const base = sr * W;
     for (const id in this.players) {
-      const f = this.faucetOf(id);
-      if (f.firehose) { this.queues[id] = QUEUE_CAP; f.openUntil = now + FAUCET_WINDOW_MS; }
       let q = this.queues[id] || 0;
       if (q <= 0) continue;
-      const open = now < f.openUntil;
-      const perTick = f.firehose ? FIREHOSE_FLOW
-        : (open ? Math.min(FLOW_MAX, FLOW_BASE + f.rate * FLOW_PER_RATE) : FLOW_CLOSED);
       const slot = colorSlot(this.players[id].color);
-      const placed = this.placeGrains(slot, SPOUT_X[slot] || 40, sr, Math.min(q, Math.max(1, Math.round(perTick))));
-      this.queues[id] = q - placed;
+      const x0 = SPOUT_X[slot] || 40;
+      let release = Math.min(q, MAX_SPAWN_PER_TICK);
+      while (release > 0) {
+        let placed = false;
+        for (const o of offs) {
+          const xx = x0 + o;
+          if (xx < 0 || xx >= W) continue;
+          if (this.grid[base + xx] === 0) { this.grid[base + xx] = slot; placed = true; break; }
+        }
+        if (!placed) break;
+        q--; release--;
+      }
+      this.queues[id] = q;
+    }
+  }
+  // debug fast-fill: directly pack the lowest empty cells with the player's colour (no
+  // pour/physics), so testing the archive doesn't require minutes of typing.
+  floodFill() {
+    for (const id in this.flooding) {
+      if (!this.flooding[id] || !this.players[id]) continue;
+      const slot = colorSlot(this.players[id].color);
+      let budget = FLOOD_ROWS_PER_TICK * W;
+      for (let y = H - 1; y >= 0 && budget > 0; y--) {
+        const b = y * W;
+        for (let x = 0; x < W && budget > 0; x++) if (this.grid[b + x] === 0) { this.grid[b + x] = slot; budget--; }
+      }
     }
   }
   physics() {
@@ -310,6 +278,7 @@ class Room {
   tick() {
     this.frame++;
     this.spawn();
+    this.floodFill();               // debug fast-fill (no-op unless a player toggled flood)
     this.physics(); this.physics(); // 2 gravity sub-steps/tick (gentler, slower fall)
     const cells = [], g = this.grid, pv = this.prev;
     for (let i = 0; i < g.length; i++) if (g[i] !== pv[i]) { cells.push(i, g[i]); pv[i] = g[i]; }

@@ -37,10 +37,10 @@ ws://<host>/r/<roomId>?_pk=<playerId>
 
 ```ts
 { type:"join",  name:"Fay", color:"auto" }  // 加入；color 由服务端分配
-{ type:"input", ticks: 1234 }               // 累计击键数（服务端算增量 → 水龙头出沙）
+{ type:"input", ticks: 1234 }               // 累计击键数（服务端算增量 → 出沙）
 { type:"leave" }                            // 显式退出（释放颜色名额）
 { type:"reset" }                            // 清空本房间画布 + 归档（原型：任何人可）
-{ type:"flood", on:true }                   // debug：开/关消防水管快速灌沙（测试用）
+{ type:"flood", on:true }                   // debug：开/关快速灌沙（直接从底部实心填，测试用）
 { type:"ping",  t: 123 }                    // 测 RTT，服务端原样回 pong
 ```
 
@@ -102,33 +102,19 @@ conns   : Map<ws, playerId>
 | 颜色槽位 | amber/teal/violet/rose = 1/2/3/4 | `color 名 → grid 值`，全局一致 |
 | 出口 `SPOUT_X` | {1:30,2:50,3:10,4:70} | 按槽位、沿 `W=80` 均匀分布（中心向外）；出口随堆顶上移（`surface - SPAWN_GAP`） |
 | `SPAWN_GAP` | 135 | 出沙口在堆顶上方这么多行；与客户端 0.618 镜头锚点配套，使水龙头落在视口顶部附近 |
-| 物理帧率 | 20fps（`TICK_MS=50`） | 每 tick：spawn → 重力×2 子步 → diff → 广播 patch → 压缩检查（2 子步让下落更顺） |
+| 物理帧率 | 20fps（`TICK_MS=50`） | 每 tick：spawn → flood → 重力×2 子步 → diff → 广播 patch → 压缩检查（2 子步让下落更顺） |
+| `MAX_SPAWN_PER_TICK` | 4 / 玩家 | 出沙限速：**细水流**（出口附近一行几列），避免狂打字一帧倒满 |
 | 房间容量 | 4 人 | 第 5 个新玩家 → `room_full` |
 | 存盘间隔 | 5s（`SAVE_MS`） | dirty 才写 |
 | `COMPRESS_ROWS`（Stage 3） | 64 | 一次压缩折叠的底部行数（= 一条 band 概括的真实行数） |
-| `COMPRESS_MARGIN`（Stage 3） | 40 | 触发阈值：当**密实层** `packedTop()` 逼近顶部到这么近时压缩 |
+| `COMPRESS_MARGIN`（Stage 3） | 40 | 触发阈值：当**密实层** `packedTop()`（行内 ≥ W/2 的最高行）逼近顶部到这么近时压缩 |
+| `FLOOD_ROWS_PER_TICK` | 6 | debug `flood`：直接从底部实心填这么多行/tick（测试用快速灌满，绕过出沙/物理） |
 
-### 水龙头：输入 → 出沙流量
-
-服务端把击键换算成沙(不是 1 键 1 粒)，并模拟水龙头的"开关 + 流量"。**沙的总量**由击键数决定(`GRAINS_PER_KEY`)，**流速**单独由打字频率决定。
-
-| 参数 | 值 | 说明 |
-|---|---|---|
-| `GRAINS_PER_KEY` | 6 | 每次击键值多少粒沙(反馈更足；未来技能会调) |
-| `FAUCET_WINDOW_MS` | 500 | 打字后水龙头开这么久；超时关闭 |
-| `FLOW_BASE` | 10 | 开启、慢打时的基础流速(粒/tick/玩家) |
-| `FLOW_PER_RATE` | 1.2 | 每 (键/秒) 的打字速度额外加多少流速 → 打得越快流量越大 |
-| `FLOW_MAX` | 40 | 流速上限(粒/tick/玩家)；`SAND_MAX_SPAWN` 可覆盖 |
-| `FLOW_CLOSED` | 6 | 水龙头关闭后剩余沙的涓流速率(让流自然收尾) |
-| `FIREHOSE_FLOW` | 120 | debug `flood` 的灌沙速率(快但 < 2·W，避免堵在出口) |
-
-> 出沙是**整列散开**(中心向外)的：流量越大、水流越宽/越厚。一条 w 宽的水流每 tick 最多过 ~2·w 粒(每列每 tick 落 ≤2 行)，超了就堵在出口、灌不到底——所以散开到足够宽、且 `FIREHOSE_FLOW` 压在 2·W 以下。
->
-> 堆顶 `surface()` 与密实层 `packedTop()` 都**自底向上**数、遇到第一段非堆体就停：这样正在下落的(还没连到底的)水流不会把出沙口/镜头/压缩触发带偏。水流窄时与自顶向下扫描等价。
+> 出沙换算（`onInput`）目前是**简单细水流**：每次击键 +1 粒入队（上限 600），`spawn()` 每 tick 每玩家最多放 `MAX_SPAWN_PER_TICK` 粒、落在出口附近几列。这套"流量/水龙头"模型待重设计——曾试过的"按频率放大流量"版本因水流太宽被回退。
 
 物理算法（逐行自底向上，重力 + 随机左右下滑，扫描方向逐帧交替）沿用旧客户端引擎，现在跑在服务端、对所有人是同一份。
 
-> 测试用环境变量(覆盖上表，仅供 smoke 测试起小而快的房间；**生产用默认值**，`W/H` 是与客户端的共享契约)：`SAND_H` / `SAND_COMPRESS_ROWS` / `SAND_COMPRESS_MARGIN` / `SAND_MAX_SPAWN` / `SAND_GRAINS_PER_KEY` / `SAND_FAUCET_WINDOW` / `SAND_FLOW_BASE` / `SAND_QUEUE_CAP` / `SAND_FIREHOSE` / `SAND_SAVE_MS` / `SAND_DATA_DIR`。
+> 测试用环境变量(覆盖上表，仅供 smoke 测试起小而快的房间；**生产用默认值**，`W/H` 是与客户端的共享契约)：`SAND_H` / `SAND_COMPRESS_ROWS` / `SAND_COMPRESS_MARGIN` / `SAND_MAX_SPAWN` / `SAND_SAVE_MS` / `SAND_DATA_DIR`。
 
 ---
 
