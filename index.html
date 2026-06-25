@@ -124,7 +124,7 @@
     display: flex; align-items: center; justify-content: center;
     font-family: inherit; font-size: 11px; letter-spacing: .12em;
     color: #161619;
-    background: var(--color-accent);
+    background: #fff;
     border: none; border-radius: 10px;
     cursor: pointer;
     box-shadow: 0 2px 8px rgba(0,0,0,.35);
@@ -342,6 +342,9 @@
           <button id="editSave">ok</button>
         </div>
 
+        <div class="menu-sep"></div>
+        <button class="menu-item danger" id="exitBtn">exit</button>
+
         <div class="menu-sep" id="debugSep" hidden></div>
         <div class="menu-debug" id="debugRow" hidden>
           <div class="menu-debug-head">
@@ -352,21 +355,18 @@
             <div class="menu-brush" id="brushRow"><span class="menu-brush-tag">spout</span></div>
             <button class="menu-item" id="pourBtn">💧 pour continuously</button>
             <button class="menu-item" id="floodBtn">⏬ flood-fill (archive test)</button>
+            <button class="menu-item" id="resetBtn">empty the bottle</button>
             <pre class="menu-perf" id="perfBox">—</pre>
           </div>
         </div>
-
-        <div class="menu-sep"></div>
-        <button class="menu-item" id="resetBtn">empty the bottle</button>
-        <button class="menu-item danger" id="exitBtn">exit</button>
       </div>
 
       <!-- BODY · the bottle (drag to dig) ----------------------------- -->
       <div class="bottle-wrap">
         <canvas id="bottle" width="160" height="500" data-no-drag aria-label="瓶子"></canvas>
         <div class="scrollbar"><div class="thumb" id="thumb"></div></div>
-        <button class="nav-btn nav-top" id="surfaceBtn" data-no-drag hidden title="回到地表">↑ 地表</button>
-        <button class="nav-btn nav-bot" id="peekBtn" data-no-drag hidden title="往下挖历史">↓ 更早</button>
+        <button class="nav-btn nav-top" id="surfaceBtn" data-no-drag hidden title="回到地表">↑ 回到地表</button>
+        <button class="nav-btn nav-bot" id="peekBtn" data-no-drag hidden title="查看历史">↓ 查看历史</button>
       </div>
 
     </div>
@@ -419,6 +419,12 @@
   // webview never reads global input itself, and never decides grain placement.
   const TW        = window.__TAURI__ && window.__TAURI__.window;
   const TE        = window.__TAURI__ && window.__TAURI__.event;
+  // LogicalSize lives in the dpi module in Tauri v2 (NOT window) — needed to fit the
+  // menu popover to its content height. Tolerate either namespace just in case.
+  const TLogicalSize = window.__TAURI__ && (
+    (window.__TAURI__.dpi && window.__TAURI__.dpi.LogicalSize) ||
+    (window.__TAURI__.window && window.__TAURI__.window.LogicalSize)
+  );
   const appWindow = TW ? TW.getCurrentWindow() : null;
   const params    = new URLSearchParams(location.search);
 
@@ -465,10 +471,10 @@
     const MENU_W = 260;                          // matches tauri.conf "menu" window width
     let lastFitH = 0;
     function fitHeight() {
-      if (!selfWin || !TW || !TW.LogicalSize || !selfWin.setSize) return;
+      if (!selfWin || !TLogicalSize || !selfWin.setSize) return;
       requestAnimationFrame(function () {
         const h = Math.ceil(menu.getBoundingClientRect().height);
-        if (h && h !== lastFitH) { lastFitH = h; try { selfWin.setSize(new TW.LogicalSize(MENU_W, h)); } catch (_) {} }
+        if (h && h !== lastFitH) { lastFitH = h; try { Promise.resolve(selfWin.setSize(new TLogicalSize(MENU_W, h))).catch(function () {}); } catch (_) {} }
       });
     }
     function copyToClipboard(t) {
