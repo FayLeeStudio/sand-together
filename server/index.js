@@ -1,11 +1,11 @@
-// Sand Together — authoritative room server (Stage 1, server-authoritative).
+// Sand Together — authoritative room server.
 //
-// The big invariant change (CLAUDE.md, 2026-06-21): physics runs HERE, on the
-// server, once per room. The server holds the one true `grid`; clients only send
-// input (their cumulative keystroke count) and render the grid we broadcast. No
-// client runs authoritative physics, so everyone in a room sees the exact same
-// thing. Privacy red line is intact: we only ever handle counts + grid pixels —
-// never key contents, never text.
+// The room is the AUTHORITY: it runs the falling-sand sim (the shared CA in ../sim.js),
+// holds the one true `grid`, arbitrates input order, persists, and broadcasts. Clients
+// send input (their cumulative keystroke count) + render. The sim is being migrated to
+// deterministic lockstep (clients will also run ../sim.js locally) — see doc/architecture.md
+// 「同步模型」. Privacy red line: we only ever handle counts + grid pixels — never key
+// contents, never text.
 //
 // Saves are DECOUPLED (ARK-style): a WORLD save per room (grid + bands + member roster)
 // and a global PLAYER profile per playerId (name + skills + lifetime + worlds joined).
@@ -32,18 +32,19 @@
 //   playerId is carried in the URL: ws://host/r/<roomId>?_pk=<persistent-id>
 //
 // Stage 3 (archive, infinite stacking): when the settled pile crowds the top of the
-// active grid, the server moves the bottom rows VERBATIM into a "band" (lossless — the
-// exact pixels), shifts the active grid down to free room, and broadcasts a `band`. The
-// client mirrors the same deterministic shift + archives the band, and renders it below
-// the active grid at full resolution (scroll down for the complete history). Size-
-// compression (RLE/gzip) is a later optimization. Privacy red line holds: a band stores
-// only colour slots + grain counts — never key contents.
+// active grid, the sim moves the bottom rows VERBATIM into a "band" (lossless — the exact
+// pixels) and shifts the active grid down; the server broadcasts a `band`. The client
+// mirrors the same deterministic shift + archives the band, and renders it below the
+// active grid at full resolution (scroll down for the complete history). Size-compression
+// (RLE/gzip) is a later optimization. Privacy red line holds: a band stores only colour
+// slots + grain counts — never key contents.
 
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const { WebSocketServer } = require("ws");
+const { W, ROOM_COLORS, SandSim } = require("../sim.js"); // the shared deterministic CA
 
 // numEnv: positive-integer env override or default. The sim sizes/rates are
 // overridable ONLY so the smoke tests can spin up a tiny, fast room; production
@@ -61,37 +62,24 @@ const PLAYERS_DIR = path.join(DATA_DIR, "players");
 fs.mkdirSync(WORLDS_DIR, { recursive: true });
 fs.mkdirSync(PLAYERS_DIR, { recursive: true });
 
-// --- sim constants (shared contract with the client renderer; frontend.md) ---
-const W = 80;             // grid columns
-const H = numEnv("SAND_H", 300); // grid rows (authoritative; the client shows a window). 300 → a taller bottle — must match the client's H
-const ROOM_COLORS = ["amber", "teal", "violet", "rose"]; // slot 1..4 = grid value
+// --- per-room sim config (the CA itself lives in ../sim.js). W is fixed in sim.js; H and
+// the Stage-3 rates are env-overridable here ONLY for the smoke tests — production keeps
+// the defaults, which are a shared contract with the client renderer (frontend.md). ---
+const H = numEnv("SAND_H", 300); // grid rows (authoritative; the client shows a window). must match the client's H
 const ROOM_CAP = 4;
-const SPOUT_X = { 1: 30, 2: 50, 3: 10, 4: 70 }; // evenly spaced across W=80, centre-out (must match client)
-const SURFACE_MIN_CELLS = 6;  // a row needs this many grains to count as the settled surface
-const SPAWN_ROW = 2;          // top boundary for the pour source
-const SPAWN_GAP = 75;         // pour this far above the settled surface (matches the client's spout offset); keeps the spout near the top while sand fills ~0.618
-const TICK_MS = 50;           // ~20fps physics
+const TICK_MS = 50;              // ~20fps physics
 const SAVE_MS = numEnv("SAND_SAVE_MS", 5000);
-// The pour source is an N×N square "brush" centred on the spout: each tick it refills
-// its N×N footprint from the player's queue. Because the brush is N rows TALL and gravity
-// drops 2 rows/tick, consecutive stamps connect for N≥2 (a continuous N-wide stream);
-// N=1 leaves a 1-row gap (the old one-at-a-time dashed look). Width is capped at SPOUT_MAX.
-const SPOUT_MAX = 5;
-const DEFAULT_SPOUT = numEnv("SAND_SPOUT", 1); // brush size out of the box (1 = one-at-a-time; 2+ = continuous)
-const FLOOD_ROWS_PER_TICK = 6; // debug {type:"flood"}: directly fill this many bottom rows/tick (fast archive test)
-
-// --- Stage 3: archive compression (infinite stacking; see doc/stage3-compression.md) ---
-// When the settled surface crowds within COMPRESS_MARGIN rows of the top, fold the
-// bottom COMPRESS_ROWS rows into one band and shift the active grid down by that
-// much. Bands stack below the active grid; the client renders them as thin strips.
-const COMPRESS_ROWS   = numEnv("SAND_COMPRESS_ROWS", 64);   // rows folded into one band
-const COMPRESS_MARGIN = numEnv("SAND_COMPRESS_MARGIN", 40); // trigger when the surface reaches this near row 0
+const DEFAULT_SPOUT = numEnv("SAND_SPOUT", 1);              // brush size out of the box (1 = one-at-a-time; 2+ = continuous)
+const FLOOD_ROWS_PER_TICK = 6;                             // debug {type:"flood"}: bottom rows filled/tick
+const COMPRESS_ROWS   = numEnv("SAND_COMPRESS_ROWS", 64);   // Stage 3: rows folded into one band
+const COMPRESS_MARGIN = numEnv("SAND_COMPRESS_MARGIN", 40); // Stage 3: trigger when a packed layer reaches this near row 0
 const CHECKSUM_LOG    = numEnv("SAND_CHECKSUM_LOG", 0);     // >0: log a grid checksum every N ticks (divergence watch; off in prod)
+// What the sim needs to construct a room. Bundled so every Room (and headless tests) builds
+// the same shape; a fresh room gets a crypto seed (load() overrides for an existing world).
+const simConfig = () => ({ H, COMPRESS_ROWS, COMPRESS_MARGIN, FLOOD_ROWS_PER_TICK, DEFAULT_SPOUT, rngState: crypto.randomBytes(4).readUInt32LE(0) });
 
-const colorSlot = (c) => Math.max(1, ROOM_COLORS.indexOf(c) + 1);
 // A band archives COMPRESS_ROWS real rows LOSSLESSLY: `cells` = rows*W bytes (the exact
-// pixels, slot 0..4) + `rows` + `n` (grain count). No size-compression yet — that's a
-// later optimization (RLE/gzip); step 1 is just a faithful, complete history.
+// pixels, slot 0..4). On the wire/disk those bytes are base64.
 const b64enc = (u8) => Buffer.from(u8).toString("base64");
 function b64dec(s, len) { const buf = Buffer.from(String(s || ""), "base64"); const a = new Uint8Array(len); a.set(buf.subarray(0, len)); return a; }
 
@@ -146,24 +134,19 @@ class PlayerStore {
 }
 const playerStore = new PlayerStore();
 
+// A Room WRAPS a SandSim (the authoritative grid) and owns everything the sim does NOT:
+// the WebSocket connections, persistence, the player-NAME roster (via profiles), the diff
+// baseline `prev` for per-cell patches, and broadcasting. The sim state (grid/bands/rng/
+// frame/queues/...) lives entirely on this.sim, so a client running the same sim.js can
+// reproduce it from the snapshot + the inputs.
 class Room {
   constructor(id, opts = {}) {
     this.id = id;
-    this.grid = new Uint8Array(W * H);
+    this.sim = new SandSim(simConfig());
     this.prev = new Uint8Array(W * H); // last-broadcast grid, for diffing patches
-    this.bands = [];                   // Stage 3 archive: [{ rows, n, cells:Uint8Array(rows*W) }], index 0 = oldest/deepest
     this.createdAt = Date.now();       // world birth (load() overrides for existing worlds)
     this.members = {};                 // playerId -> { color, ticks, contributionTicks, joinedAt } (name lives on the global profile)
-    this.queues = {};                  // playerId -> grains pending spawn
-    this.spoutSize = {};               // playerId -> N (pour brush size 1..SPOUT_MAX)
-    this.flooding = {};                // playerId -> bool (debug fast bottom-fill)
-    this.pouring = {};                 // playerId -> bool (debug: keep the spout saturated)
     this.conns = new Map();            // ws -> playerId
-    this.frame = 0;
-    // Seeded PRNG state (mulberry32) — the CA's ONLY randomness (fall()'s left/right
-    // slide) is drawn from here, so the grid is a pure function of (rngState + inputs).
-    // Persisted with the world so a restart resumes the same deterministic stream.
-    this.rngState = crypto.randomBytes(4).readUInt32LE(0);
     this.dirty = false;                // grid/players changed since last save
     this.timer = null;
     this.saveTimer = null;
@@ -193,7 +176,7 @@ class Room {
   safeId() { return this.id.replace(/[^A-Za-z0-9_-]/g, "_"); }
   file() { return path.join(WORLDS_DIR, this.safeId() + ".json"); }
   // Bands for the wire/disk: cells → base64. Old saves have no `bands` → [] (back-compat).
-  serializeBands() { return this.bands.map((b) => ({ rows: b.rows, n: b.n, cells: b64enc(b.cells) })); }
+  serializeBands() { return this.sim.bands.map((b) => ({ rows: b.rows, n: b.n, cells: b64enc(b.cells) })); }
   load() {
     // Preferred: the new world file under worlds/. Fallback: a legacy top-level
     // data/<id>.json in the old { players:{pid:{name,color,ticks}} } shape — convert it
@@ -203,28 +186,32 @@ class Room {
     if (!d) { try { d = JSON.parse(fs.readFileSync(path.join(DATA_DIR, this.safeId() + ".json"), "utf8")); } catch (_) {} }
     if (!d) return; // fresh room
     if (d.createdAt) this.createdAt = d.createdAt;
-    if (typeof d.rng === "number") this.rngState = d.rng >>> 0; // resume the deterministic stream
-    if (d.grid) { const buf = Buffer.from(d.grid, "base64"); this.grid.set(buf.subarray(0, W * H)); }
-    if (Array.isArray(d.bands)) this.bands = d.bands.map((b) => { const rows = b.rows | 0; return { rows, n: b.n | 0, cells: b64dec(b.cells, rows * W) }; });
+    if (typeof d.rng === "number") this.sim.rngState = d.rng >>> 0; // resume the deterministic stream
+    if (d.grid) { const buf = Buffer.from(d.grid, "base64"); this.sim.grid.set(buf.subarray(0, W * H)); }
+    if (Array.isArray(d.bands)) this.sim.bands = d.bands.map((b) => { const rows = b.rows | 0; return { rows, n: b.n | 0, cells: b64dec(b.cells, rows * W) }; });
     if (d.members && typeof d.members === "object") {
-      for (const id in d.members) { const m = d.members[id] || {}; this.members[id] = { color: m.color || ROOM_COLORS[0], ticks: m.ticks | 0, contributionTicks: m.contributionTicks | 0, joinedAt: m.joinedAt || 0 }; }
+      for (const id in d.members) { const m = d.members[id] || {}; this.addMemberLocal(id, m.color || ROOM_COLORS[0], { ticks: m.ticks | 0, contributionTicks: m.contributionTicks | 0, joinedAt: m.joinedAt || 0 }); }
     } else if (d.players && typeof d.players === "object") {
       // legacy shape: lift each player's name into the global profile, keep color/ticks as a member.
       for (const id in d.players) {
         const p = d.players[id] || {};
-        this.members[id] = { color: p.color || ROOM_COLORS[0], ticks: p.ticks | 0, contributionTicks: 0, joinedAt: 0 };
+        this.addMemberLocal(id, p.color || ROOM_COLORS[0], { ticks: p.ticks | 0, contributionTicks: 0, joinedAt: 0 });
         playerStore.touch(id, p.name); playerStore.addWorld(id, this.id); playerStore.bumpLifetime(id, p.ticks | 0);
       }
       this.dirty = true; // re-persist under the new worlds/ path + shape on the next save
     }
-    this.prev.set(this.grid);
+    this.prev.set(this.sim.grid);
   }
   save() {
     if (!this.dirty) return;
     this.dirty = false;
-    const data = { id: this.id, createdAt: this.createdAt, rng: this.rngState, members: this.members, grid: Buffer.from(this.grid).toString("base64"), bands: this.serializeBands() };
+    const data = { id: this.id, createdAt: this.createdAt, rng: this.sim.rngState, members: this.members, grid: Buffer.from(this.sim.grid).toString("base64"), bands: this.serializeBands() };
     fs.writeFile(this.file(), JSON.stringify(data), () => {});
   }
+
+  // Add a member to BOTH the rich persistence roster (this.members) and the slim sim
+  // roster (this.sim.members) in one place, so they never drift apart.
+  addMemberLocal(id, color, extra) { this.members[id] = Object.assign({ color }, extra || {}); this.sim.addMember(id, color); }
 
   // ---- connection lifecycle ----
   join(ws, playerId, name) {
@@ -236,7 +223,7 @@ class Room {
     }
     playerStore.touch(playerId, name);     // global profile: identity/name/lastSeen
     if (!this.members[playerId]) {
-      this.members[playerId] = { color: this.takeColor(), ticks: 0, contributionTicks: 0, joinedAt: Date.now() };
+      this.addMemberLocal(playerId, this.takeColor(), { ticks: 0, contributionTicks: 0, joinedAt: Date.now() });
       this.dirty = true;
     }
     playerStore.addWorld(playerId, this.id); // bidirectional membership: profile ↔ world
@@ -250,161 +237,46 @@ class Room {
     const m = this.members[playerId];
     if (!m) return;
     ticks = Number(ticks) || 0;
-    const delta = ticks - m.ticks;
-    if (delta > 0) this.queues[playerId] = Math.min((this.queues[playerId] || 0) + delta, 600);
+    this.sim.enqueue(playerId, ticks - m.ticks); // delta grains → pour queue (sim caps it)
     m.ticks = ticks;
     playerStore.bumpLifetime(playerId, ticks); // global lifetime = high-water mark of the device counter
   }
-  setSpout(playerId, size) { if (this.members[playerId]) this.spoutSize[playerId] = Math.max(1, Math.min(SPOUT_MAX, size | 0)); }
-  setFirehose(playerId, on) { if (this.members[playerId]) this.flooding[playerId] = !!on; } // debug fast bottom-fill
-  setPour(playerId, on) { if (this.members[playerId]) this.pouring[playerId] = !!on; }       // debug keep spout saturated
+  setSpout(playerId, size) { if (this.members[playerId]) this.sim.setSpout(playerId, size); } // pour brush 1..5
+  setFirehose(playerId, on) { if (this.members[playerId]) this.sim.setFlood(playerId, on); }   // debug fast bottom-fill
+  setPour(playerId, on) { if (this.members[playerId]) this.sim.setPour(playerId, on); }        // debug keep spout saturated
   leave(playerId) {
     if (!this.members[playerId]) return;
-    delete this.members[playerId]; delete this.queues[playerId];
-    delete this.spoutSize[playerId]; delete this.flooding[playerId]; delete this.pouring[playerId];
+    delete this.members[playerId]; this.sim.removeMember(playerId);
     // NOTE: we keep roomId in the profile's `worlds` — "has joined" is a history record.
     this.dirty = true; this.broadcastPlayers();
   }
   drop(ws) { // keep player (offline ≠ exit), but stop debug pours so they can't run forever
     const pid = this.conns.get(ws);
     this.conns.delete(ws);
-    if (pid) { this.flooding[pid] = false; this.pouring[pid] = false; }
+    if (pid) { this.sim.setFlood(pid, false); this.sim.setPour(pid, false); }
     this.maybeStop();
   }
   reset() { // empty the room's shared canvas + archive (Stage 1: anyone may; prototype)
-    this.grid.fill(0); this.prev.fill(0); this.bands = []; this.dirty = true;
+    this.sim.reset(); this.prev.fill(0); this.dirty = true;
     for (const ws of this.conns.keys()) this.snapshotTo(ws);
-  }
-
-  // ---- physics (ported from the old client engine; now authoritative) ----
-  surface() { // settled pile top: first row (top→down) with enough sand to be a real
-    // surface, not the few grains still falling — keeps the pour source from chasing
-    // its own stream (matches the client's camera anchor).
-    for (let y = 0; y < H; y++) {
-      const b = y * W; let n = 0;
-      for (let x = 0; x < W; x++) if (this.grid[b + x] && ++n >= SURFACE_MIN_CELLS) return y;
-    }
-    return H;
-  }
-  packedTop() { // first row (top→down) that is at least HALF full — a genuinely packed
-    // layer. The thin pour stream never fills half a row, so this won't fire the archive
-    // trigger prematurely while the bottle fills.
-    const need = W >> 1;
-    for (let y = 0; y < H; y++) {
-      const b = y * W; let n = 0;
-      for (let x = 0; x < W; x++) if (this.grid[b + x] && ++n >= need) return y;
-    }
-    return H;
-  }
-  // Refill the N×N brush footprint at (sr, x0-centred) from `max` available grains;
-  // returns how many were placed. The brush is N tall so the stream stays continuous.
-  brush(slot, x0, sr, N, max) {
-    let placed = 0; const half = (N - 1) >> 1;
-    for (let r = 0; r < N && placed < max; r++) {
-      const rb = (sr + r) * W;
-      if (rb < 0 || rb + W > W * H) continue;
-      for (let c = 0; c < N && placed < max; c++) {
-        const xx = x0 - half + c;
-        if (xx < 0 || xx >= W) continue;
-        if (this.grid[rb + xx] === 0) { this.grid[rb + xx] = slot; placed++; }
-      }
-    }
-    return placed;
-  }
-  spawn() {
-    const sr = Math.max(SPAWN_ROW, this.surface() - SPAWN_GAP); // source rides just above the peak
-    for (const id of Object.keys(this.members).sort()) { // sorted = deterministic multi-player order (lockstep contract)
-      const slot = colorSlot(this.members[id].color);
-      const x0 = SPOUT_X[slot] || 40;
-      const N = this.spoutSize[id] || DEFAULT_SPOUT;
-      if (this.pouring[id]) { this.brush(slot, x0, sr, N, N * N); continue; } // debug: tap full open
-      const q = this.queues[id] || 0;
-      if (q <= 0) continue;
-      this.queues[id] = q - this.brush(slot, x0, sr, N, q); // pour from your keystroke queue
-    }
-  }
-  // debug fast-fill: directly pack the lowest empty cells with the player's colour (no
-  // pour/physics), so testing the archive doesn't require minutes of typing.
-  floodFill() {
-    for (const id of Object.keys(this.flooding).sort()) {
-      if (!this.flooding[id] || !this.members[id]) continue;
-      const slot = colorSlot(this.members[id].color);
-      let budget = FLOOD_ROWS_PER_TICK * W;
-      for (let y = H - 1; y >= 0 && budget > 0; y--) {
-        const b = y * W;
-        for (let x = 0; x < W && budget > 0; x++) if (this.grid[b + x] === 0) { this.grid[b + x] = slot; budget--; }
-      }
-    }
-  }
-  physics() {
-    const ltr = (this.frame & 1) === 0;
-    for (let y = H - 2; y >= 0; y--) {
-      if (ltr) { for (let x = 0; x < W; x++) this.fall(x, y); }
-      else { for (let x = W - 1; x >= 0; x--) this.fall(x, y); }
-    }
-  }
-  fall(x, y) {
-    const g = this.grid, i = y * W + x, c = g[i];
-    if (!c) return;
-    const below = i + W;
-    if (g[below] === 0) { g[below] = c; g[i] = 0; return; }
-    const dl = x > 0 && g[below - 1] === 0;
-    const dr = x < W - 1 && g[below + 1] === 0;
-    if (dl && dr) { if ((this.nextU32() & 1) === 0) g[below - 1] = c; else g[below + 1] = c; g[i] = 0; }
-    else if (dl) { g[below - 1] = c; g[i] = 0; }
-    else if (dr) { g[below + 1] = c; g[i] = 0; }
-  }
-
-  // mulberry32 step: integer-only PRNG (deterministic across JS engines — no float, no
-  // Math.random). Advances rngState, returns a uint32. The CA draws it ONLY in fall(),
-  // in a fixed scan order, so the random stream is reproducible.
-  nextU32() {
-    let t = (this.rngState = (this.rngState + 0x6D2B79F5) >>> 0);
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return (t ^ (t >>> 14)) >>> 0;
-  }
-  // FNV-1a over the grid bytes — a cheap divergence detector. Two nodes running the same
-  // seeded sim on the same ordered inputs MUST agree here on every tick.
-  checksum() {
-    let h = 0x811c9dc5; const g = this.grid;
-    for (let i = 0; i < g.length; i++) { h ^= g[i]; h = Math.imul(h, 0x01000193); }
-    return h >>> 0;
-  }
-
-  // ---- Stage 3: move the bottom into the archive, free room at the top ----
-  // Copy the bottom COMPRESS_ROWS rows VERBATIM into a band (lossless — the exact
-  // pixels), append it, then shift the whole active grid DOWN by that many rows so the
-  // top frees up for new sand. The active grid stays bounded (physics cost capped) while
-  // history is preserved exactly. The diff baseline is resynced to the post-shift grid
-  // (no giant patch) and a `band` is broadcast; clients apply the identical shift.
-  archiveBottom() {
-    const K = COMPRESS_ROWS, g = this.grid;
-    const cells = g.slice((H - K) * W, H * W); // exact bottom K rows (K*W bytes), lossless
-    let n = 0; for (let i = 0; i < cells.length; i++) if (cells[i]) n++;
-    if (n === 0) return; // nothing settled down there yet — don't archive an empty band
-    this.bands.push({ rows: K, n, cells });
-    g.copyWithin(K * W, 0, (H - K) * W); // row y -> y+K (memmove handles the overlap)
-    g.fill(0, 0, K * W);                  // free the top K rows
-    this.prev.set(g);                     // diff baseline = post-shift grid
-    this.dirty = true;
-    this.broadcast({ type: "band", rows: K, n, cells: b64enc(cells) });
   }
 
   // ---- loop + broadcast ----
   tick() {
-    this.frame++;
-    this.spawn();
-    this.floodFill();               // debug fast-fill (no-op unless a player toggled flood)
-    this.physics(); this.physics(); // 2 gravity sub-steps/tick (gentler, slower fall)
-    const cells = [], g = this.grid, pv = this.prev;
+    this.sim.step();
+    const g = this.sim.grid, pv = this.prev, cells = [];
     for (let i = 0; i < g.length; i++) if (g[i] !== pv[i]) { cells.push(i, g[i]); pv[i] = g[i]; }
     if (cells.length) { this.dirty = true; this.broadcast({ type: "patch", c: cells }); }
-    // archive AFTER the patch broadcast so clients reach the pre-shift grid first,
-    // then apply the same shift on the `band` message. Trigger on a packed layer
-    // (not the falling curtain) so we only fold a genuinely full bottom.
-    if (H > COMPRESS_ROWS && this.packedTop() <= COMPRESS_MARGIN) this.archiveBottom();
-    if (CHECKSUM_LOG && this.frame % CHECKSUM_LOG === 0) console.log(`[sand] ${this.id} f${this.frame} chk ${this.checksum().toString(16)}`);
+    // Archive AFTER the patch broadcast so clients reach the pre-shift grid first, then
+    // apply the same shift on the `band` message. maybeArchive() folds a genuinely packed
+    // bottom (not the falling curtain) and returns the new band, or null.
+    const band = this.sim.maybeArchive();
+    if (band) {
+      this.prev.set(this.sim.grid); // diff baseline = post-shift grid (no giant patch)
+      this.dirty = true;
+      this.broadcast({ type: "band", rows: band.rows, n: band.n, cells: b64enc(band.cells) });
+    }
+    if (CHECKSUM_LOG && this.sim.frame % CHECKSUM_LOG === 0) console.log(`[sand] ${this.id} f${this.sim.frame} chk ${this.sim.checksum().toString(16)}`);
   }
   // Synthesize the wire roster from world members (color/ticks) + global profiles (name),
   // back into the old { id:{name,color,ticks} } shape — so the wire protocol is UNCHANGED
@@ -422,7 +294,7 @@ class Room {
       ws.send(JSON.stringify({
         type: "snapshot", w: W, h: H,
         players: this.rosterForWire(),
-        grid: Buffer.from(this.grid).toString("base64"),
+        grid: Buffer.from(this.sim.grid).toString("base64"),
         bands: this.serializeBands(),
       }));
     } catch (_) {}
@@ -438,6 +310,7 @@ const rooms = new Map();
 const getRoom = (id) => { let r = rooms.get(id); if (!r) { r = new Room(id); rooms.set(id, r); } return r; };
 
 const INDEX_HTML = path.join(__dirname, "..", "index.html");
+const SIM_JS = path.join(__dirname, "..", "sim.js");
 const server = http.createServer((req, res) => {
   const p = (req.url || "/").split("?")[0];
   if (p === "/" || p === "/index.html") {
@@ -448,6 +321,16 @@ const server = http.createServer((req, res) => {
       // no-cache → clients revalidate, so a deploy (git pull + restart) takes effect on
       // the next load instead of the webview/browser serving a stale cached page.
       res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" });
+      res.end(buf);
+    });
+    return;
+  }
+  if (p === "/sim.js") {
+    // The shared deterministic CA, same-origin for the page's <script src="/sim.js">.
+    // no-cache so a deploy takes effect on the next load (same as index.html).
+    fs.readFile(SIM_JS, (err, buf) => {
+      if (err) { res.writeHead(404); res.end("sim.js not found"); return; }
+      res.writeHead(200, { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-cache" });
       res.end(buf);
     });
     return;
