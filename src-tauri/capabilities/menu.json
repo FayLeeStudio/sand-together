@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "menu-window",
-  "description": "The menu popover window (remote #menu page): receive the roster via events, send user actions + exit back, and hide itself. Positioning + click-away hiding are done natively (Rust), so this window needs no window-geometry permissions.",
+  "description": "The menu popover window (remote #menu page): receive the roster via events, send user actions + exit back, hide itself, and resize itself to fit its content height (setSize). Positioning + click-away hiding are done natively (Rust).",
   "windows": ["menu"],
   "remote": {
     "urls": [
@@ -14,6 +14,7 @@
     "core:event:allow-listen",
     "core:event:allow-unlisten",
     "core:event:allow-emit",
-    "core:window:allow-hide"
+    "core:window:allow-hide",
+    "core:window:allow-set-size"
   ]
 }
