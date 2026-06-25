@@ -75,7 +75,7 @@ const FLOOD_ROWS_PER_TICK = 6;                             // debug {type:"flood
 const COMPRESS_ROWS   = numEnv("SAND_COMPRESS_ROWS", 64);   // Stage 3: rows folded into one band
 const COMPRESS_MARGIN = numEnv("SAND_COMPRESS_MARGIN", 40); // Stage 3: trigger when a packed layer reaches this near row 0
 const CHECKSUM_LOG    = numEnv("SAND_CHECKSUM_LOG", 0);     // >0: log a grid checksum every N ticks (divergence watch; off in prod)
-const EMIT_FRAMES     = !!process.env.SAND_EMIT_FRAMES;     // emit the lockstep `frame` event log each tick (OFF in prod → zero wire change; on for replay.test + Phase 2)
+const EMIT_FRAMES     = process.env.SAND_EMIT_FRAMES !== "0"; // Phase 2 ACTIVE: emit the lockstep `frame` event log each tick by default (clients run /sim.js locally). Set SAND_EMIT_FRAMES=0 to force the old patch-only path. `patch` is still broadcast too (back-compat for old cached clients); drop it in Phase 3.
 // What the sim needs to construct a room. Bundled so every Room (and headless tests) builds
 // the same shape; a fresh room gets a crypto seed (load() overrides for an existing world).
 const simConfig = () => ({ H, COMPRESS_ROWS, COMPRESS_MARGIN, FLOOD_ROWS_PER_TICK, DEFAULT_SPOUT, rngState: crypto.randomBytes(4).readUInt32LE(0) });
