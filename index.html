@@ -472,9 +472,14 @@
     let lastFitH = 0;
     function fitHeight() {
       if (!selfWin || !TLogicalSize || !selfWin.setSize) return;
+      // Two rAFs: WebView2 needs the extra frame for a display:none→flex expand (the
+      // debug panel) to finish laying out before we measure — a single frame reads short
+      // (the perf <pre> hasn't reflowed yet), so the window grows too little and clips it.
       requestAnimationFrame(function () {
-        const h = Math.ceil(menu.getBoundingClientRect().height);
-        if (h && h !== lastFitH) { lastFitH = h; try { Promise.resolve(selfWin.setSize(new TLogicalSize(MENU_W, h))).catch(function () {}); } catch (_) {} }
+        requestAnimationFrame(function () {
+          const h = Math.ceil(Math.max(menu.getBoundingClientRect().height, menu.scrollHeight)) + 2;
+          if (h && h !== lastFitH) { lastFitH = h; try { Promise.resolve(selfWin.setSize(new TLogicalSize(MENU_W, h))).catch(function () {}); } catch (_) {} }
+        });
       });
     }
     function copyToClipboard(t) {
@@ -567,6 +572,7 @@
       debugSwitch.setAttribute("aria-checked", open ? "true" : "false");
       debugBody.hidden = !open;
       fitHeight();
+      setTimeout(fitHeight, 140);   // backstop if the rAF measure lands a frame early in WebView2
     });
 
     // debug controls — emit intents; the App owns the WS and forwards them + reflects
