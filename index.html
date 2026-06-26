@@ -726,8 +726,14 @@
     }
     return H;
   }
-  // Low-passed surface so the camera + spouts glide instead of stepping row by row.
+  // Low-passed surface so the camera glides instead of stepping row by row.
   let smSurface = H;
+  // Separate, tightly-tracking surface for the SPOUT bulb only. The bulb must sit exactly
+  // where sand actually emerges (the sim spawns at the INSTANT surface − SPAWN_GAP), so this
+  // snaps UP to a rising pile almost immediately — no lag, hence no "the pile creeps toward
+  // the spout, then it snaps back" artifact — and only drifts DOWN slowly to stay jitter-free.
+  // The camera keeps using the gentler smSurface so the viewport itself still glides.
+  let smSpout = H;
   // Keep the pile surface pinned at CAMERA_ANCHOR (0.618) down the view: the upper
   // ~62% is transparent sky holding the fixed spout, the lower ~38% shows the tower
   // top. While the tower is short the target sits below maxCameraY, so the camera
@@ -834,9 +840,9 @@
     // full set of sources; each previews the CURRENT stratum's palette for its slot (so its
     // colour advances with height). The id label above a spout is drawn only for slots that
     // an online player occupies — empty slots show the figure but no name.
-    const srcRow = Math.max(0, Math.round(smSurface) - SPAWN_GAP);
+    const srcRow = Math.max(0, Math.round(smSpout) - SPAWN_GAP);
     const bulbCy = Math.round((srcRow - cameraY) * S);
-    const pal = LEVEL_PALETTES[levelAtHeight(worldH() - 1 - Math.round(smSurface))];
+    const pal = LEVEL_PALETTES[levelAtHeight(worldH() - 1 - Math.round(smSpout))];
     if (bulbCy > -(SRC_R * S + 14) && bulbCy < viewRows * S) {
       const slotName = {};
       for (const id in players) {
@@ -934,6 +940,7 @@
     // is a row index; smaller = higher pile, so a growing pile means s < smSurface.)
     const s = surface();
     smSurface += (s - smSurface) * (s < smSurface ? 0.2 : 0.02);
+    smSpout += (s - smSpout) * (s < smSpout ? 0.6 : 0.05); // bulb tracks the real spawn point tightly (fast up, gentle down)
     const ft = followTarget();
     if (follow) {
       cameraY += (ft - cameraY) * 0.16;
@@ -1146,7 +1153,7 @@
     if (LOCKSTEP && msg.lockstep) {          // server emits frames → lockstep: snapshot seeds the local sim
       buildAuthSim(msg);
       if (msg.players) applyPlayers(msg.players);
-      smSurface = surface();
+      smSurface = smSpout = surface();
       if (follow) cameraY = followTarget();
       return;
     }
@@ -1157,7 +1164,7 @@
       : [];
     rebuildArchive();
     if (msg.players) applyPlayers(msg.players);
-    smSurface = surface();                 // land on the real surface, no swoop on join
+    smSurface = smSpout = surface();       // land on the real surface, no swoop on join
     if (follow) cameraY = followTarget();
   }
   function applyPatch(cells) {
@@ -1177,7 +1184,7 @@
     grid.fill(0, 0, K * W);
     bands.push({ rows: K, n: msg.n | 0, cells: b64ToCells(msg.cells, K * W) });
     rebuildArchive();
-    smSurface += K;
+    smSurface += K; smSpout += K;
     cameraY = Math.min(maxCameraY(), cameraY + K);
   }
 
@@ -1219,7 +1226,7 @@
     applyFrameEvents(authSim, f.events);
     authSim.step();
     const band = authSim.maybeArchive();
-    if (band) { bands = authSim.bands; rebuildArchive(); smSurface += band.rows; cameraY = Math.min(maxCameraY(), cameraY + band.rows); }
+    if (band) { bands = authSim.bands; rebuildArchive(); smSurface += band.rows; smSpout += band.rows; cameraY = Math.min(maxCameraY(), cameraY + band.rows); }
     renderDirty = true; // authSim moved → the prediction must be recomputed next frame
     if (f.chk !== undefined && (authSim.checksum() >>> 0) !== (f.chk >>> 0)) requestResync(); // diverged from the server → re-seed
   }
@@ -1340,7 +1347,7 @@
     if (authSim) { authSim = null; renderSim = null; confirmedMyCount = 0; lockOn = false; frameBuf = []; grid = new Uint8Array(W * H); }
     grid.fill(0); bands = []; rebuildArchive();
     for (const id in players) removePlayer(id);
-    cameraY = H - viewRows; follow = true; smSurface = H;
+    cameraY = H - viewRows; follow = true; smSurface = smSpout = H;
   }
   function switchRoom(code) {
     const r = normRoom(code);
