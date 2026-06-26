@@ -14,6 +14,11 @@ rust-version = "1.77.2"
 name = "app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+# Opt-in: ship the in-menu debug fill tools in a RELEASE build.
+# Default `npm run build` stays clean; `npm run build:debug` enables this.
+debugtools = []
+
 [build-dependencies]
 tauri-build = { version = "2.6.2", features = [] }
 

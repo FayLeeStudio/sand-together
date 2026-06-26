@@ -80,9 +80,10 @@ pub fn run() {
         });
       });
 
-      // Debug builds (`npm run dev`): flip the overlay into ?debug so the menu's fill
-      // tools appear with zero manual setup. Release builds (`npm run build`) stay clean.
-      if cfg!(debug_assertions) {
+      // Flip the overlay into ?debug so the menu's fill tools appear with zero manual
+      // setup. On in dev (`npm run dev`) AND in a release built with the `debugtools`
+      // feature (`npm run build:debug`). A plain release (`npm run build`) stays clean.
+      if cfg!(debug_assertions) || cfg!(feature = "debugtools") {
         if let Some(main) = handle.get_webview_window("main") {
           if let Ok(url) = "https://sandtogether.indiegames.design/#overlay&debug".parse() {
             let _ = main.navigate(url);
